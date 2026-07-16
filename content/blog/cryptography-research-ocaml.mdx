@@ -1,0 +1,245 @@
+---
+title: "Performance Engineering of Cryptographic Primitives in OCaml and OxCaml"
+description: "A completed compiler and runtime engineering study: how we took OCaml Rijndael from 34 MB/s to full C parity, demonstrated OxCaml SIMD ChaCha20 at 86% of C SIMD throughput, and precisely quantified the irreducible language costs that remain."
+date: "2026-07-16"
+lastUpdated: "2026-07-16"
+tags: ["research", "performance", "cryptography", "ocaml", "systems"]
+relatedProjects: ["cryptography-research"]
+relatedArticles: ["building-an-online-judge"]
+---
+
+OCaml is used in production security-critical systems at Jane Street, Meta, and others — but there has been limited rigorous research on how its cryptographic performance compares to C, especially with modern SIMD optimizations. This study set out to close that gap with a systematic, assembly-guided performance analysis across six cryptographic primitives.
+
+The methodology is **assembly-guided**: generated machine code serves as the primary evidence, with benchmarks as consistency checks rather than the definitive metric. Every optimization hypothesis was validated by inspecting the assembly change before consulting the benchmark.
+
+The full dataset and source is at [github.com/fplaunchpad/ocaml-c-cryptography](https://github.com/fplaunchpad/ocaml-c-cryptography): 6 primitives, 15 distinct implementations, ~35 named optimization stages, 51 benchmark CSV files, and ~10,900 documentation lines across 39 files.
+
+## Key Results
+
+| Primitive | Implementation | Throughput (MB/s) | vs C | Classification |
+|---|---|---:|---:|---|
+| XOR | OCaml scalar | ~200 | 0.50× | Partially irreducible (tagging) |
+| Rijndael | OCaml scalar (optimized) | ~160 | **1.00×** | **Closed** |
+| ChaCha20 | OCaml scalar | 53.70 | 0.31× | ~99% irreducible |
+| ChaCha20 | OxCaml SIMD | 275.03 | 1.61× scalar / **0.86× C SIMD** | 14% outer-loop gap |
+| SHA-256 | OCaml scalar | 48.68 | 0.33× | ~99% irreducible |
+| SHA-256 | OxCaml int32# | 73.99 | 0.50× | Rotate gap (compiler fix needed) |
+
+## The Research Scope
+
+Six primitives, studied in sequence — each chosen to expose a different dimension of language overhead:
+
+| Algorithm | C scalar | C SIMD | OCaml scalar | OxCaml SIMD |
+|---|:---:|:---:|:---:|:---:|
+| XOR | ✓ | — | ✓ | — |
+| AES-128 (manual) | ✓ | — | ✓ | — |
+| Rijndael (T-table) | ✓ | — | ✓ | — |
+| AES-NI | ✓ | — | ✓ (C bindings) | partial |
+| ChaCha20 | ✓ | ✓ | ✓ | ✓ |
+| SHA-256 | ✓ | — | ✓ | ✓ (int32#) |
+
+OxCaml is Jane Street's fork of OCaml that adds unboxed types (`int32#`, `float32#`) and `[@@builtin]` SIMD intrinsics. It is the vehicle for investigating how much of the performance gap is language architecture versus missing compiler support.
+
+XOR established the measurement framework and confirmed the integer tagging overhead (~0.50× C). AES-128 proved algorithm-limited and shifted strategy toward optimized variants. Each subsequent primitive exposed a new dimension.
+
+## The Rijndael Breakthrough: It Was the GC, Not the Algorithm
+
+The most striking result came from Rijndael AES-128. Starting from a direct OCaml translation of the C reference:
+
+- **C Rijndael:** ~155–164 MB/s
+- **OCaml baseline:** ~34 MB/s (20% of C)
+
+A 5× gap on an algorithm that is essentially T-table lookups and XOR operations. The gap seemed inexplicable — until we looked at allocation.
+
+```
+OCaml baseline: 314,826,400 minor word allocations per 100MB benchmark run
+                1,208 minor GC collections
+```
+
+The culprit was `Int32`. OCaml's standard `int32` type is a *boxed* heap value. Every arithmetic operation — XOR, shift, addition — allocates a new boxed `Int32` on the minor heap. In AES's inner loop, this is catastrophic: each round of AES-128 does 16 T-table lookups and 4 XOR operations on the 4×4 state matrix, all operating on `Int32` values.
+
+The fix was to convert the entire state representation from `Int32` to native OCaml `int` with explicit 32-bit masking:
+
+```ocaml
+(* Before: boxed Int32 *)
+let xor_state (a : int32) (b : int32) : int32 = Int32.logxor a b
+
+(* After: native int with masking *)
+let mask32 (x : int) : int = x land 0xFFFFFFFF
+let xor_state (a : int) (b : int) : int = mask32 (a lxor b)
+```
+
+The allocation profile after this change:
+
+```
+After int migration: 3,440 minor word allocations per run
+                     8 minor GC collections
+```
+
+From 314 million allocations to 3,440. From 1,208 GC pauses to 8. The throughput:
+
+| Implementation | Encrypt (MB/s) | Decrypt (MB/s) |
+|---|---:|---:|
+| AES-128 C | ~5 | ~0.9 |
+| AES-128 OCaml | ~4 | ~0.9 |
+| Rijndael C | ~155 | ~155 |
+| **Rijndael OCaml (optimized)** | **~163** | **~163** |
+| AES-NI C | ~1,382 | ~1,162 |
+| AES-NI OCaml (C bindings) | ~1,177 | ~818 |
+
+OCaml's optimized Rijndael slightly *exceeds* C's throughput. The same algorithm, implemented with the same logic — the only variable was whether the state lived in heap-allocated `Int32` boxes or in native `int` registers.
+
+`Array.unsafe_get` also mattered: removing bounds checks on T-table lookups added +65.9% throughput. The safety argument is solid — the indices are bytes, always in 0–255, guaranteed by the preceding `land 0xFF` mask. OCaml's "unsafe" here means "I own the invariant the runtime would otherwise check," not actual danger.
+
+<Callout type="tip" title="The Insight">
+In hot-path OCaml code, GC overhead is often invisible until you measure allocations directly. If a loop body allocates even one heap object per iteration, you are paying for GC at the algorithm's inner loop frequency. The fix is almost always: use native `int` instead of boxed numeric types.
+</Callout>
+
+## ChaCha20: Dissecting an Irreducible Gap
+
+ChaCha20 tells a different story. The final scalar results:
+
+| Implementation | Throughput (MB/s) | vs C |
+|---|---:|---:|
+| C scalar | 170.57 | 1.00× |
+| **OCaml scalar (Opt02)** | **53.70** | **0.31×** |
+| C SIMD | 319.65 | 1.87× |
+| OxCaml SIMD (Opt06) | 275.03 | 1.61× |
+
+OCaml scalar is 3.17× slower than C scalar, and our analysis showed that ~99% of this gap is irreducible in standard OCaml. Three language-level costs account for it:
+
+**1. Integer tagging (~13.5% of hot-path instructions)**
+
+Every OCaml `int` is `2n+1` — the low bit is always set. This is how the GC distinguishes pointers from integers at runtime. Every XOR and addition has to account for it:
+
+```asm
+; OCaml: a XOR b
+xorq    %rsi, %rax          ; XOR the tagged values
+orq     $1,   %rax          ; restore the tag bit (XOR clears it if inputs match)
+
+; C: a ^ b
+xorl    %esi, %eax          ; one instruction
+```
+
+**2. mask32 cost (~25.8% of hot-path instructions)**
+
+ChaCha20 is defined over 32-bit arithmetic, but OCaml's native `int` is 63 bits. Every time we need `& 0xFFFFFFFF`, the constant doesn't fit in a 32-bit sign-extended immediate on x86-64. The compiler emits:
+
+```asm
+; OCaml mask32 on x86-64
+movabsq $8589934591, %rcx    ; load 0x1FFFFFFFF (63-bit) via 8-byte immediate
+andq    %rcx,       %rax     ; AND
+
+; C: uint32_t arithmetic
+; (no instruction — values are natively 32-bit)
+```
+
+We attempted to hoist the `0xFFFFFFFF` constant to a module-level `let` binding. The assembly was identical — OCaml's Clambda pass folds constants through `[@inline]` boundaries completely. The `let` binding evaporated before code generation.
+
+**3. Rotate expansion (~7 instructions vs 1)**
+
+ChaCha20 relies heavily on left-rotate operations. C compilers have recognized the `(x << n) | (x >> (32-n))` idiom since 2003 and emit a single `roll` instruction. OCaml has no rotate primitive, and the compiler does not recognize the pattern:
+
+```asm
+; OCaml rotate: ~7 instructions
+movq    %rax, %rcx
+shrq    $25,  %rcx        ; x >> (32-7)
+leaq    -1(%rax,%rax), %rax  ; x << 1 (tagged-int left shift)
+...
+
+; C: 1 instruction
+roll    $7, %eax
+```
+
+These three costs together account for 40–45% of OCaml's hot-path instruction count with no source-level remedy. The gap is architectural — it would require the OCaml compiler to implement rotate idiom recognition and a different integer representation for 32-bit-domain algorithms.
+
+One experiment surprised us: making the hot loop's preamble use `Array.unsafe_get` caused a **regression of −2.0%**. Reading the assembly explained it: the bounds-checked preamble loads were serving as *range proofs* that the compiler used to eliminate bounds checks in the output section. Removing them from the preamble moved the checks to a more expensive location. Instruction count decreased; wall-clock time increased. Location matters more than count.
+
+## OxCaml SIMD: The Block Function Gap Is Zero
+
+OxCaml adds `[@@builtin]` SIMD intrinsics that compile directly to SSE/AVX instructions without C stub crossings. For ChaCha20's block function, the results are striking:
+
+The OxCaml SIMD block function emits **identical SSE instructions** to C SIMD. `paddd`, `xorps`, `pslld`, `psrld`, `pshufb`, `shufps` — the same instructions, in the same order, at the same throughput. The block function gap is genuinely zero.
+
+The 14% residual gap (275 vs 319 MB/s) lives entirely in the outer loop:
+
+- **Counter update:** C uses one 32-bit store. OxCaml uses 4 `Bytes.unsafe_set` calls — 16 instructions vs 2. This is reducible once OxCaml gains unboxed 32-bit stores to `Bytes`.
+- **Output buffer allocation:** `chacha20_crypt` allocates one output buffer per call. C writes in-place. This is an API-level constraint, not a compiler limitation.
+
+This result has real implications for cryptographic library authors targeting OCaml: the inner compute loop is no longer the bottleneck — the surrounding orchestration code is.
+
+## AES-NI: FFI Overhead at Scale
+
+AES-NI shows the cost of the OCaml ↔ C boundary under high-throughput conditions:
+
+| Implementation | Encrypt (MB/s) |
+|---|---:|
+| C (AES-NI intrinsics) | ~1,382 |
+| OCaml + C bindings (1 FFI call/block) | ~1,177 |
+| OxCaml SIMD (partial — 11 FFI calls/block) | ~142 |
+
+The OCaml+C approach makes one FFI call per 16-byte AES block. On a 100 MB input, that is **6.55 million OCaml→C stub crossings**. The result is 85% of C's throughput — measurable, but workable.
+
+OxCaml SIMD is slower than plain OCaml+C because the AES round instructions (`AESENC`, `AESENCLAST`, `AESDEC`, `AESDECLAST`) are not yet OxCaml `[@@builtin]` intrinsics. Key expansion uses native SIMD, but each AES round still crosses the C boundary — 11 times per block instead of 1. Until AES-NI is exposed as a builtin, OxCaml cannot improve on the C-binding approach for this algorithm.
+
+## SHA-256: Unboxed Types Save 52%
+
+SHA-256 was designed as a pure OCaml optimization study — no SIMD, no C FFI, just source-level changes within the OCaml/OxCaml type system.
+
+| Implementation | Throughput (MB/s) | vs C |
+|---|---:|---:|
+| C scalar (GCC -O2) | 148.53 | 1.00× |
+| OCaml baseline | 32.29 | 0.22× |
+| OCaml Opt07 | 48.68 | 0.33× |
+| **OxCaml int32# migration** | **73.99** | **0.50×** |
+
+Seven sequential optimizations brought OCaml from 32 to 48 MB/s (+50.7%). The biggest single gain was Opt02: replacing bounds-checked `Array.get` with `Array.unsafe_get` throughout the 64-round compression loop (+26.4%). The bounds checks are safe to remove because the indices are statically known loop variables in 0–63.
+
+Full loop unrolling (Opt05) was attempted and reverted. 64 rounds written out explicitly generated ~30 KB of machine code — fitting in a 32 KB L1-I cache, but the instruction-cache pressure caused a −3.0% regression in practice.
+
+OxCaml's `int32#` (unboxed 32-bit integer) migration added another +52.0% over Opt07 by eliminating the same Int32 boxing problem that plagued the Rijndael baseline. SHA-256's working variables (`a` through `h`, the schedule array) are all 32-bit — with `int32#`, they stay in registers instead of the heap.
+
+The remaining 2.01× gap vs C comes from three sources the compiler cannot currently fix:
+- No rotate-idiom recognition in Flambda2's x86-64 backend (~1.89 billion extra instructions per 100 MB)
+- Register pressure from 8 working variables + 3 pointers + loop counters forcing stack spills
+- `bytes → int32#` conversion requiring sign-extending `movsl` instructions at buffer boundaries
+
+<Callout type="info" title="The Rotate Problem">
+The `(x lsr n) lor (x lsl (32-n))` pattern for rotate-right appears in every SHA-256 sigma function. GCC has recognized this idiom since version 3.3 (2003) and emits a single `rorl`. OCaml's native compiler does not — implementing this in Flambda2 is identified as the highest-priority remaining compiler optimization for SHA-256.
+</Callout>
+
+## Two Consistent Surprises Across All Algorithms
+
+Two findings appeared repeatedly and are worth highlighting for anyone writing performance-critical OCaml:
+
+**`Array.unsafe_get` can make things slower.**
+
+The ChaCha20 Opt04 experiment showed a −2.0% regression from removing bounds checks. The SHA-256 Opt05 unrolling experiment showed a −3.0% regression. In both cases, the issue was that removing checks disrupted the compiler's ability to place remaining checks in optimal positions, or caused instruction-cache pressure. Before assuming `Array.unsafe_get` is always a win, measure — and look at the assembly.
+
+**Constant hoisting through `[@inline]` is neutralized by Clambda.**
+
+Hoisting `0xFFFFFFFF` to a module-level `let` binding produced zero change in the generated code for ChaCha20. The OCaml compiler's Clambda intermediate representation folds constants through `[@inline]` function boundaries completely — the `let` binding never survives to native code generation. Trust the compiler more on constant folding, and verify your optimization hypotheses with assembly inspection before committing.
+
+## Compiler Recommendations
+
+The research identified the highest-value missing improvements for each layer:
+
+**For compiler developers:**
+- Rotate idiom recognition in Flambda2 would eliminate ~1.89 billion extra instructions per 100 MB in SHA-256 alone
+- Six AES-NI instructions missing from OxCaml `[@@builtin]` coverage; their addition would reduce the AES-NI gap from ~10× to ChaCha20 levels
+- Unboxed 32-bit `Bytes` store primitive would close the ChaCha20 outer-loop counter gap
+
+**For OCaml developers:**
+- `Array.unsafe_get` is not a blanket optimization — preamble safe accesses serve as validity proofs; removing them can relocate overhead rather than eliminate it
+- Any `let rec` inside a function referencing outer scope values allocates a heap closure per call — pass values as explicit parameters instead
+- `Int32` in hot loops always deserves scrutiny; native `int` with explicit masking is almost always faster
+
+## Conclusion
+
+The research is complete. The core finding: **full C parity is achievable for algorithms whose arithmetic is byte extraction and XOR** — Rijndael OCaml matches C after eliminating Int32 boxing while preserving all safety properties.
+
+For 32-bit modular arithmetic, the scalar OCaml gap remains ~3× after source optimization. This is attributable to integer tagging and masking requirements and is ~99% irreducible without `int32#` or compiler changes.
+
+OxCaml SIMD reaches 86% of equivalent C when all required builtins exist. The inner compute loop is no longer the bottleneck; the surrounding orchestration code is.
+
+The natural progression — Poly1305, ChaCha20-Poly1305 AEAD, and eventually a full TLS cryptographic layer — remains as future work. The current results establish a clear benchmark: what OCaml can and cannot do today, and what compiler improvements would be needed to close the remaining gaps.

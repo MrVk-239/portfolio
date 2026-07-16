@@ -1,0 +1,268 @@
+---
+title: "Building an Online Judge During My Software Engineering Co-op at AlgoUniversity"
+description: "How I architected a production-grade competitive programming platform with a sandboxed multi-language execution engine, JWT-based auth, and AI-powered code review — and the engineering decisions that shaped it."
+date: "2025-07-15"
+lastUpdated: "2025-07-15"
+tags: ["backend", "systems", "nodejs", "docker", "mongodb"]
+relatedProjects: ["online-judge"]
+relatedArticles: ["cryptography-research-ocaml"]
+---
+
+At AlgoUniversity — a Y-Combinator backed edtech startup — I spent my Software Engineering Co-op building an online judge from scratch. The platform lets users solve coding problems, submit solutions in C, C++, Java, or Python, and receive instant automated verdicts alongside AI-assisted feedback. This post walks through the architecture, the engineering decisions that shaped it, and what I'd do differently with hindsight.
+
+## The Architecture: Three Independent Services
+
+The system is split into three services that communicate over HTTP. This separation wasn't accidental — it came from a concrete constraint: code execution is inherently untrusted and needs to be isolated from the business logic that stores user data and handles authentication.
+
+```
+┌──────────────────────┐       ┌──────────────────────┐
+│   React Frontend     │──────▶│   Express Backend     │
+│   (Vite + Redux)     │       │   (Node.js + MongoDB) │
+└──────────────────────┘       └──────────────────────┘
+           │                              │
+           │                             JWT Auth
+           │                              │
+           ▼                              ▼
+┌──────────────────────┐       ┌──────────────────────┐
+│  Compiler Microservice│       │   MongoDB Atlas       │
+│  (Node.js, port 8000) │       │   (Problems, Users,   │
+│  Code → Verdict       │       │    Submissions)       │
+└──────────────────────┘       └──────────────────────┘
+```
+
+The backend manages problems, test cases, users, and submission records. The compiler microservice accepts code submissions, executes them in isolation, and returns stdout. The frontend orchestrates the evaluation flow by calling both services.
+
+## The Compiler Microservice: Where the Interesting Work Happens
+
+The compiler is a standalone Express server on port 8000 that exposes a single `POST /run` endpoint. Every request goes through the same pipeline:
+
+**Step 1 — Write the code to a temp file.**
+
+Every submission gets a UUID as its job ID, which becomes the filename. This prevents collisions under concurrent load and makes cleanup deterministic.
+
+```javascript
+const { v4: uuid } = require("uuid");
+
+const generateFile = (format, content) => {
+  const jobID = uuid();
+  const filename = `${jobID}.${format}`;
+  const filePath = path.join(dirCodes, filename);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+};
+```
+
+The same pattern applies to input files — custom stdin gets its own UUID-named file, passed to the executor via stdin redirection.
+
+**Step 2 — Execute with a hard timeout.**
+
+Each language has its own executor. The C++ executor is representative:
+
+```javascript
+const executeCpp = async (filePath, inputFilePath) => {
+  const jobID = path.basename(filePath).split(".")[0];
+  const outPath = path.join(outputPath, `${jobID}.exe`);
+
+  return new Promise((resolve, reject) => {
+    const command = inputFilePath
+      ? `g++ "${filePath}" -o "${outPath}" && timeout 2 "${outPath}" < "${inputFilePath}"`
+      : `g++ "${filePath}" -o "${outPath}" && timeout 2 "${outPath}"`;
+
+    exec(command, { timeout: 3000 }, (error, stdout, stderr) => {
+      if (error) {
+        if (error.killed || error.signal === "SIGTERM") {
+          return reject({ type: "timeout", message: "Time Limit Exceeded" });
+        }
+        return reject({ type: "compilation", message: stderr || error.message });
+      }
+      resolve(stdout);
+    });
+  });
+};
+```
+
+Two layers of timeout defense: the Unix `timeout 2` command hard-kills the process after 2 seconds, and Node's `exec` timeout of 3000ms provides a backup. The `/run` endpoint adds a third layer with `Promise.race`:
+
+```javascript
+const execWithTimeout = async (fn) => {
+  return await Promise.race([
+    fn(filePath, inputFilePath),
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error("Execution timed out (possible infinite loop)")),
+        3000
+      )
+    ),
+  ]);
+};
+```
+
+<Callout type="info" title="Why Three Timeout Layers?">
+Defensive redundancy. `timeout 2` is the most reliable — it uses the OS-level SIGKILL. But shell commands can be finicky on different platforms. Node's `exec` timeout and `Promise.race` are insurance. In practice, the Unix timeout fires first and the others never trigger.
+</Callout>
+
+## The Submission Flow: A Surprising Client-Side Decision
+
+The most architecturally interesting aspect is where verdict computation happens. The frontend — not the backend — is responsible for testing code against all test cases.
+
+When a user clicks Submit, the React component:
+
+1. Fetches the test cases for the problem from the backend
+2. Calls `VITE_COMPILER_URL/run` once *per test case*, passing the test case's input
+3. Trims the compiler's output and compares it against the expected output
+4. Aggregates the results into a pass/fail verdict
+5. POSTs `{ problemId, language, code, passed: boolean }` to the backend
+
+```javascript
+const submitCode = async () => {
+  const results = await Promise.all(
+    testcases.map(async (tc, index) => {
+      const res = await axios.post(`${compilerURL}/run`, {
+        language,
+        code,
+        input: tc.input,
+      });
+      const userOutput = res.data.output.trim();
+      const expectedOutput = tc.output.trim();
+      return { passed: userOutput === expectedOutput, index: index + 1, ...tc };
+    })
+  );
+
+  const allPassed = results.every((r) => r.passed);
+
+  await axios.post(
+    `${backendURL}/api/submissions`,
+    { problemId: id, language, code, passed: allPassed },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+};
+```
+
+<Callout type="warning" title="The Security Tradeoff">
+This architecture has an inherent trust issue: the backend accepts `passed: true` from the client without re-verifying it. In a production judge, verdict computation should always happen server-side — clients are untrusted. For AlgoUniversity's learning platform context, this was an acceptable tradeoff. A production-grade judge would execute test cases on the backend (or in a worker queue) and derive the verdict independently.
+</Callout>
+
+The upside of this approach is simplicity: no worker queues, no job polling, no WebSocket connections for real-time updates. The user sees immediate feedback because the browser runs all test cases in parallel via `Promise.all`.
+
+## Data Models: Problem and Submission
+
+The Problem schema reflects what a judge actually needs — not just the problem statement, but the input/output specification that makes automated grading possible.
+
+```javascript
+const problemSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  inputFormat: { type: String, required: true },
+  outputFormat: { type: String, required: true },
+  sampleInput: { type: String, required: true },
+  sampleOutput: { type: String, required: true },
+  constraints: String,
+  difficulty: {
+    type: String,
+    enum: ["Easy", "Medium", "Hard"],
+    default: "Easy",
+  },
+  tags: { type: [String], default: [] },
+  creator: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+});
+```
+
+Test cases live in a separate `Testcase` collection, linked by `problemId`. This separation matters: it lets admins add, edit, or delete test cases without touching the problem document, and it keeps hidden test cases out of the problem payload sent to users.
+
+The Submission schema is deliberately minimal — it stores what happened, not how to reproduce it:
+
+```javascript
+const submissionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  problemId: { type: mongoose.Schema.Types.ObjectId, ref: "Problem", required: true },
+  language: { type: String, required: true },
+  code: { type: String, required: true },
+  passed: { type: Boolean, required: true },
+}, { timestamps: true });
+```
+
+`timestamps: true` gives `createdAt` and `updatedAt` for free, which power the submission history UI.
+
+## Authentication: JWT with Role-Based Access
+
+The backend uses a stateless JWT approach. A `protect` middleware validates the token on every protected route:
+
+```javascript
+router.post("/submissions", protect, saveSubmission);
+router.get("/:problemId", protect, getMySubmissions);
+```
+
+Role-based access restricts problem management to admins. Regular users can solve problems and view their own submission history; only admins can create problems, manage test cases, and see all submissions. The `getSubmissionById` endpoint enforces ownership:
+
+```javascript
+export const getSubmissionById = async (req, res) => {
+  const submission = await Submission.findById(req.params.id);
+  if (!submission) return res.status(404).json({ message: "Not found" });
+
+  const isOwner = submission.userId.toString() === req.user._id.toString();
+  const isAdmin = req.user.role === "admin";
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ message: "Not authorized" });
+  }
+
+  res.json(submission);
+};
+```
+
+This prevents users from viewing each other's code submissions — an important privacy guarantee for a learning platform.
+
+## AI Code Review: Gemini 2.0 Flash
+
+The AI review feature is one of the more differentiated aspects of the platform. Rather than just showing pass/fail, it gives users code-specific hints via Google Gemini.
+
+The prompt is carefully designed to be educational without being a solution generator:
+
+```javascript
+const prompt = `
+You are an AI code reviewer.
+Problem Title: ${problemTitle}
+Problem Description: ${problemDescription}
+
+User Code:
+${code}
+
+Input:
+${input}
+
+User Output:
+${output}
+
+Please:
+- If the code is correct, suggest any optimizations.
+- If it has syntax/compilation error, explain.
+- If the logic is wrong, give hints only (not full solution).
+Also give your response in short and points wise readable
+`;
+```
+
+The instruction "give hints only (not full solution)" is load-bearing. Without it, Gemini tends to rewrite the code entirely, which defeats the purpose for a learning platform. The response comes back as Markdown and gets rendered via `ReactMarkdown`.
+
+## Performance Optimization
+
+The React frontend's initial bundle was too heavy for comfortable use on slower connections. Three changes brought page load time down by 35%:
+
+**Code splitting** with dynamic imports for heavy components (the PrismJS code editor, ReactMarkdown) so they're loaded only when the problem detail page is visited.
+
+**Redux state normalization** to avoid redundant fetches — once problems are loaded, navigating between them doesn't re-fetch from the backend.
+
+**Lazy loading** of the admin test case management UI, which is hidden for regular users and doesn't need to be in the initial bundle.
+
+## What I'd Do Differently
+
+**Move verdict computation server-side.** The client-side approach works, but it's not trustworthy. A proper architecture would have the backend queue submissions, run them against test cases in the compiler service, and send back a verdict — either via polling or WebSockets.
+
+**Add resource limits per submission.** The current setup limits execution time but not memory usage. A malicious user could submit a program that allocates gigabytes of memory, potentially degrading the server for other users. `ulimit -v` or cgroups would solve this.
+
+**Container-per-submission for true isolation.** Using `exec()` to run arbitrary code on the host OS is workable for a learning platform but not production-grade. Docker containers per submission would eliminate the risk of one submission reading another's temp files.
+
+**Better error categorization.** The current error model collapses compilation errors, runtime errors, and wrong answers into coarse categories. Structured error types would let the AI reviewer give more targeted advice.
+
+---
+
+Building this during my co-op at AlgoUniversity was one of the most practically valuable experiences I've had — there's a significant difference between reading about distributed systems concepts and actually debugging race conditions in a multi-service architecture under a deadline. The codebase is open source at [github.com/MrVk-239/online_judge](https://github.com/MrVk-239/online_judge) if you want to dig into the implementation.

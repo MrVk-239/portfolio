@@ -1,0 +1,351 @@
+@import "tailwindcss";
+
+/* ============================================================
+   DESIGN SYSTEM — V Krishnan Portfolio
+   All values defined here. Zero hardcoded values in components.
+   ============================================================ */
+
+/* ---------- LIGHT MODE (default) ---------- */
+:root {
+  /* Base */
+  --background: #f8fafc;
+  --background-secondary: #f1f5f9;
+  --foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+
+  /* Components */
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+
+  /* Brand */
+  --primary: #4f46e5;
+  --primary-foreground: #ffffff;
+  --primary-glow: rgba(79, 70, 229, 0.12);
+  --secondary: #0ea5e9;
+  --secondary-foreground: #0f172a;
+  --accent: #f1f5f9;
+  --accent-foreground: #0f172a;
+
+  /* Semantic */
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --success: #22c55e;
+  --warning: #f59e0b;
+
+  /* Structure */
+  --border: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --input: #e2e8f0;
+  --ring: #4f46e5;
+
+  /* Typography */
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-full: 9999px;
+  --radius: 0.5rem;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.10), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 8px 32px rgba(15, 23, 42, 0.12), 0 4px 12px rgba(15, 23, 42, 0.06);
+  --shadow-primary: 0 0 0 1px rgba(79, 70, 229, 0.15), 0 4px 16px rgba(79, 70, 229, 0.15);
+
+  /* Interaction timings — "That felt smooth, not animated" */
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --duration-slow: 350ms;
+  --duration-max: 400ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+
+  /* Transition shorthands */
+  --transition-fast: var(--duration-fast) var(--ease-standard);
+  --transition-base: var(--duration-base) var(--ease-standard);
+  --transition-slow: var(--duration-slow) var(--ease-standard);
+}
+
+/* ---------- DARK MODE ---------- */
+.dark {
+  /* Base */
+  --background: #0b1120;
+  --background-secondary: #131c2e;
+  --foreground: #f1f5f9;
+  --muted: #1e293b;
+  --muted-foreground: #94a3b8;
+
+  /* Components */
+  --card: #131c2e;
+  --card-foreground: #f1f5f9;
+  --popover: #131c2e;
+  --popover-foreground: #f1f5f9;
+
+  /* Brand */
+  --primary: #6366f1;
+  --primary-foreground: #ffffff;
+  --primary-glow: rgba(99, 102, 241, 0.15);
+  --secondary: #38bdf8;
+  --secondary-foreground: #0f172a;
+  --accent: #1e293b;
+  --accent-foreground: #f1f5f9;
+
+  /* Structure */
+  --border: #1e293b;
+  --border-subtle: #152033;
+  --input: #1e293b;
+  --ring: #6366f1;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-primary: 0 0 0 1px rgba(99, 102, 241, 0.25), 0 4px 20px rgba(99, 102, 241, 0.2);
+}
+
+/* ---------- TAILWIND v4 THEME MAPPING ---------- */
+@theme inline {
+  /* Colors → CSS variables */
+  --color-background: var(--background);
+  --color-background-secondary: var(--background-secondary);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+
+  /* Typography */
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Border radius */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+}
+
+/* ---------- BASE STYLES ---------- */
+*, *::before, *::after {
+  border-color: var(--border);
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  transition: background-color var(--transition-base), color var(--transition-base);
+}
+
+/* ---------- INTERACTION SYSTEM ---------- */
+
+/* Focus ring — consistent across all interactive elements */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Remove focus ring for mouse users */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Card hover — subtle lift with shadow upgrade */
+.card-interactive {
+  transition:
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.card-interactive:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+}
+
+/* Stretched link — covers the nearest `position: relative` ancestor.
+   Independent interactive children must use `relative z-[2]` to pierce it. */
+.stretched-link::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  content: "";
+}
+
+/* Link underline — expands left to right */
+.link-underline {
+  position: relative;
+  text-decoration: none;
+}
+
+.link-underline::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  width: 0;
+  height: 1px;
+  background: var(--primary);
+  transition: width var(--transition-base) var(--ease-out);
+}
+
+.link-underline:hover::after {
+  width: 100%;
+}
+
+/* Button interactions */
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  transition:
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast),
+    filter var(--transition-fast);
+}
+
+.btn-primary:hover {
+  transform: scale(1.02);
+  box-shadow: var(--shadow-primary);
+  filter: brightness(1.08);
+}
+
+.btn-primary:active {
+  transform: scale(0.99);
+}
+
+/* Monospace numbers */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono), monospace;
+}
+
+/* ---------- SCROLLBAR ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* ---------- SELECTION ---------- */
+::selection {
+  background: color-mix(in srgb, var(--primary) 25%, transparent);
+  color: var(--foreground);
+}
+
+/* ---------- REDUCED MOTION ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ---------- TYPOGRAPHY UTILITIES ---------- */
+.text-balance {
+  text-wrap: balance;
+}
+
+.font-mono-num {
+  font-family: var(--font-mono), monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* ---------- GLASSMORPHISM (use sparingly) ---------- */
+.glass {
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+/* ---------- CUSTOM CURSOR ---------- */
+.custom-cursor-active,
+.custom-cursor-active * {
+  cursor: none !important;
+}
+
+/* ---------- SKIP LINK ---------- */
+.skip-to-content {
+  position: fixed;
+  top: -100%;
+  left: 1rem;
+  z-index: 9999;
+  padding: 0.5rem 1rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: top var(--duration-fast);
+}
+.skip-to-content:focus { top: 1rem; }
+
+/* ---------- SHIKI DUAL-THEME (github-light / github-dark) ---------- */
+/* These variables are injected inline by shiki; these rules activate them. */
+.shiki,
+.shiki code {
+  background-color: var(--shiki-light-bg) !important;
+  color: var(--shiki-light) !important;
+}
+.shiki span {
+  color: var(--shiki-light) !important;
+}
+html.dark .shiki,
+html.dark .shiki code {
+  background-color: var(--shiki-dark-bg) !important;
+  color: var(--shiki-dark) !important;
+}
+html.dark .shiki span {
+  color: var(--shiki-dark) !important;
+}
